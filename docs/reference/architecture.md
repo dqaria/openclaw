@@ -868,3 +868,630 @@ skills/（55 个包）
 | 开发依赖 | 13 个 |
 | 有运行时依赖的扩展 | 3 个（memory-lancedb、voice-call、diagnostics-otel） |
 | 无运行时依赖的扩展 | 27 个 |
+
+---
+
+## 11. 频道机制详解
+
+本节深入分析 OpenClaw 的频道（Channel）子系统，涵盖插件接口设计、生命周期管理、
+消息处理管道、安全/访问控制、路由与会话键构建，以及核心频道与扩展频道的区别。
+
+### 11.1 ChannelPlugin 接口体系
+
+每个频道（无论核心或扩展）都实现 `ChannelPlugin<ResolvedAccount>` 接口。
+该接口采用 **适配器模式**：将频道行为拆分为多个可选适配器，每个适配器负责一个
+关注面。频道只需实现需要的适配器即可。
+
+```
++------------------------------------------------------------------+
+|                      ChannelPlugin<ResolvedAccount>               |
+|                                                                   |
+|  必填字段:                                                         |
+|  +--------+  +------+  +--------------+  +--------+              |
+|  |   id   |  | meta |  | capabilities |  | config |              |
+|  +--------+  +------+  +--------------+  +--------+              |
+|                                                                   |
+|  可选适配器 (~20 个):                                               |
+|  +-------------+  +----------+  +----------+  +-----------+      |
+|  | onboarding  |  |  setup   |  | pairing  |  | security  |      |
+|  +-------------+  +----------+  +----------+  +-----------+      |
+|  +----------+  +----------+  +---------+  +----------+           |
+|  | gateway  |  | outbound |  |  auth   |  | elevated |           |
+|  +----------+  +----------+  +---------+  +----------+           |
+|  +-----------+  +----------+  +----------+  +-----------+        |
+|  | streaming |  | threading|  | messaging|  | agentPrompt|        |
+|  +-----------+  +----------+  +----------+  +-----------+        |
+|  +----------+  +----------+  +---------+  +-----------+          |
+|  |  groups  |  | mentions |  | actions |  | directory |          |
+|  +----------+  +----------+  +---------+  +-----------+          |
+|  +-----------+  +-----------+  +----------+  +----------+        |
+|  | heartbeat |  |  commands |  | resolver |  |  status  |        |
+|  +-----------+  +-----------+  +----------+  +----------+        |
+|  +------------+                                                   |
+|  | agentTools |                                                   |
+|  +------------+                                                   |
++------------------------------------------------------------------+
+```
+
+各适配器职责：
+
+| 适配器 | 职责 | 关键方法 |
+|--------|------|----------|
+| `config` | 账号解析、列举、启用/禁用判断、白名单读取 | `listAccountIds`, `resolveAccount`, `isEnabled`, `isConfigured` |
+| `gateway` | 频道运行时生命周期 | `startAccount`, `stopAccount`, `loginWithQrStart/Wait`, `logoutAccount` |
+| `security` | DM 策略、安全警告 | `resolveDmPolicy`, `collectWarnings` |
+| `outbound` | 消息发送、分块、投票 | `sendText`, `sendMedia`, `sendPayload`, `sendPoll` |
+| `setup` | CLI 引导向导写入配置 | `applyAccountConfig`, `validateInput` |
+| `pairing` | 配对流程（标签、通知） | `normalizeAllowEntry`, `notifyApproval` |
+| `onboarding` | CLI 交互式引导 | （引导向导钩子） |
+| `auth` | 频道登录 | `login` |
+| `elevated` | 提权白名单回退 | `allowFromFallback` |
+| `commands` | 命令门控策略 | `enforceOwnerForCommands`, `skipWhenConfigEmpty` |
+| `streaming` | 流式输出合并参数 | `blockStreamingCoalesceDefaults` |
+| `threading` | 回复模式、线程上下文 | `resolveReplyToMode`, `buildToolContext` |
+| `messaging` | 消息格式化辅助 | （消息预处理） |
+| `agentPrompt` | 频道专属 Agent 提示 | （提示注入） |
+| `groups` | 群聊行为 | `resolveRequireMention`, `resolveToolPolicy` |
+| `mentions` | @提及剥离模式 | `stripPatterns` |
+| `directory` | 联系人/群组列表 | `self`, `listPeers`, `listGroups`, `listGroupMembers` |
+| `resolver` | 目标解析 | `resolveTargets` |
+| `actions` | 消息操作（反应、编辑等） | （操作注册） |
+| `heartbeat` | 连接就绪检查、收件人解析 | `checkReady`, `resolveRecipients` |
+| `status` | 状态快照构建、探针 | `probeAccount`, `buildAccountSnapshot`, `collectStatusIssues` |
+| `agentTools` | 频道专属 Agent 工具 | （工具工厂/列表） |
+
+### 11.2 频道生命周期管理
+
+频道由 `ChannelManager`（`src/gateway/server-channels.ts`）统一管理。
+每个频道支持多账号，每个账号拥有独立的生命周期。
+
+```
+  网关启动
+     |
+     v
+  createChannelManager(loadConfig, channelLogs, channelRuntimeEnvs)
+     |
+     v
+  startChannels()  ---遍历所有已注册频道--->  startChannel(channelId)
+     |                                            |
+     |                             对每个 accountId 并发:
+     |                                            |
+     |                    +-------+-------+-------+-------+
+     |                    |       |       |       |       |
+     |                    v       v       v       v       v
+     |               account1  account2  account3  ...  accountN
+     |                    |
+     |                    v
+     |          +------- isEnabled? ------+
+     |          |  (否)                    |  (是)
+     |          v                          v
+     |    setRuntime(                isConfigured?
+     |      running=false,       +------+------+
+     |      lastError="disabled")| (否) |      | (是)
+     |                           v      |      v
+     |                     setRuntime(   |  创建 AbortController
+     |                      running=     |     |
+     |                      false,       |     v
+     |                      lastError=   |  setRuntime(running=true, lastStartAt=now)
+     |                      "not         |     |
+     |                      configured") |     v
+     |                                   |  plugin.gateway.startAccount({
+     |                                   |    cfg, accountId, account,
+     |                                   |    runtime, abortSignal,
+     |                                   |    log, getStatus, setStatus
+     |                                   |  })
+     |                                   |     |
+     |                                   |     v
+     |                                   |  [频道监听循环运行中...]
+     |                                   |     |
+     |                                   |  (正常退出 / 异常 / abort)
+     |                                   |     |
+     |                                   |     v
+     |                                   |  .finally: running=false, lastStopAt=now
+     |                                   |           清理 aborts/tasks Map
+     |                                   |
+     v                                   v
+  stopChannel(channelId, accountId?)
+     |
+     v
+  对目标账号:
+     abort.abort()                  <-- 发送 AbortSignal
+     plugin.gateway.stopAccount()   <-- 优雅关闭钩子
+     await task                     <-- 等待退出
+     setRuntime(running=false)
+```
+
+运行时状态存储结构：
+
+```
+  ChannelRuntimeStore (每个 channelId 一个)
+  +--------------------------------------------------+
+  |  aborts:   Map<accountId, AbortController>       |
+  |  tasks:    Map<accountId, Promise<unknown>>       |
+  |  runtimes: Map<accountId, ChannelAccountSnapshot> |
+  +--------------------------------------------------+
+
+  ChannelAccountSnapshot:
+  {
+    accountId:    string
+    running?:     boolean
+    connected?:   boolean
+    lastStartAt?: number
+    lastStopAt?:  number
+    lastError?:   string | null
+    configured?:  boolean
+    ...扩展字段
+  }
+```
+
+### 11.3 ChannelDock — 轻量级共享元数据
+
+`ChannelDock`（`src/channels/dock.ts`）是频道的轻量级配置层，
+为共享代码路径（路由、白名单、命令门控等）提供频道元数据，
+**无需**加载完整的频道插件。
+
+核心频道有硬编码的 `DOCKS` 记录（7 个核心频道），扩展频道通过
+`buildDockFromPlugin()` 从插件的 `ChannelPlugin` 自动构建。
+
+```
+  共享代码需要频道信息?
+         |
+         v
+  getChannelDock(channelId)
+         |
+    +----+----+
+    |         |
+    v         v
+  核心频道?   扩展频道?
+    |         |
+    v         v
+  DOCKS[id]   pluginRegistry
+  (硬编码)       |
+              v
+          buildDockFromPlugin(plugin)
+              |
+              v
+          ChannelDock {
+            id, capabilities,
+            commands?, outbound?,
+            streaming?, elevated?,
+            config?, groups?,
+            mentions?, threading?,
+            agentPrompt?
+          }
+```
+
+各核心频道 Dock 配置对比：
+
+| 频道 | chatTypes | textChunkLimit | 特殊能力 |
+|------|-----------|---------------|---------|
+| Telegram | direct, group, channel, thread | 4000 | nativeCommands, blockStreaming |
+| WhatsApp | direct, group | 4000 | polls, reactions, media |
+| Discord | direct, channel, thread | 2000 | polls, reactions, media, nativeCommands, threads |
+| Google Chat | direct, group, thread | 4000 | reactions, media, threads, blockStreaming |
+| Slack | direct, channel, thread | 4000 | reactions, media, nativeCommands, threads |
+| Signal | direct, group | 4000 | reactions, media |
+| iMessage | direct, group | 4000 | reactions, media |
+
+### 11.4 消息处理管道
+
+当一条消息从聊天平台到达 OpenClaw 时，经历以下处理管道
+（以 Telegram 为例，其他频道类似）：
+
+```
+  1. 平台事件到达
+  +-------------------------------------------------------------------+
+  |  Telegram 服务器 --webhook/polling--> Grammy Bot 框架               |
+  |  Discord 服务器 --websocket--> discord.js 事件                     |
+  |  WhatsApp --baileys 客户端--> 消息事件                              |
+  +---+---------------------------------------------------------------+
+      |
+      v
+  2. 消息去重与预处理
+  +-------------------------------------------------------------------+
+  |  去重检查（防止重复处理）                                             |
+  |  解析消息类型（文本 / 媒体 / 命令 / 编辑 / 反应 / ...）               |
+  |  提取元数据：senderId, chatType, chatId, threadId, ...              |
+  +---+---------------------------------------------------------------+
+      |
+      v
+  3. 访问控制管道 (详见 11.5)
+  +-------------------------------------------------------------------+
+  |  3a. DM 策略检查                                                   |
+  |      resolveDmPolicy() -> pairing / allowlist / open / disabled    |
+  |                                                                    |
+  |  3b. 白名单匹配                                                    |
+  |      AllowlistMatch: wildcard/id/name/tag/username/prefixed-*     |
+  |                                                                    |
+  |  3c. 命令门控                                                      |
+  |      resolveControlCommandGate() -> {commandAuthorized, shouldBlock}|
+  |                                                                    |
+  |  3d. @提及门控 (群聊)                                               |
+  |      resolveMentionGatingWithBypass()                              |
+  |      -> 群聊中需要 @提及才响应，授权命令发送者可绕过                   |
+  |                                                                    |
+  |  3e. 确认反应                                                      |
+  |      shouldAckReaction() -> 是否添加 emoji 反应表示已收到             |
+  +---+---------------------------------------------------------------+
+      |
+      v
+  4. 路由解析 (详见 11.6)
+  +-------------------------------------------------------------------+
+  |  resolveAgentRoute({cfg, channel, accountId, peer, guildId, teamId})|
+  |  -> { agentId, sessionKey, matchedBy }                             |
+  +---+---------------------------------------------------------------+
+      |
+      v
+  5. 上下文构建
+  +-------------------------------------------------------------------+
+  |  加载 Agent 会话（基于 sessionKey）                                  |
+  |  构建消息上下文（频道信息、发送者信息、群聊上下文、线程信息）            |
+  |  注入频道专属提示（agentPrompt adapter）                             |
+  |  解析群聊工具策略（groups.resolveToolPolicy）                        |
+  +---+---------------------------------------------------------------+
+      |
+      v
+  6. Agent 调度
+  +-------------------------------------------------------------------+
+  |  将消息发送给 Pi Agent 核心                                          |
+  |  Agent 使用 LLM 提供方生成响应                                       |
+  |  可能触发工具调用循环                                                |
+  +---+---------------------------------------------------------------+
+      |
+      v
+  7. 响应投递
+  +-------------------------------------------------------------------+
+  |  outbound.sendText / sendMedia / sendPayload                      |
+  |  消息分块（chunker，根据 textChunkLimit）                            |
+  |  线程处理（replyToMode: first / all / off）                         |
+  |  流式输出合并（streaming adapter）                                   |
+  |  确认反应移除（removeAckReactionAfterReply）                         |
+  +-------------------------------------------------------------------+
+```
+
+### 11.5 安全与访问控制层
+
+OpenClaw 的频道安全采用 **多层防线** 设计，从外到内依次过滤：
+
+```
+  消息到达
+     |
+     v
+  +--[第 1 层: DM 策略]--+
+  |                       |
+  |  security.resolveDmPolicy()
+  |  返回 4 种策略之一:
+  |                       |
+  |  +---------+  +-------+------+  +------+  +----------+
+  |  | pairing |  | allowlist    |  | open |  | disabled |
+  |  +---------+  +--------------+  +------+  +----------+
+  |  需先配对     需在白名单内     放行全部   拒绝全部
+  |  才能通讯     才允许 DM       DM 消息   DM 消息
+  |                       |
+  +-----+------ 通过? ----+
+        |
+        v
+  +--[第 2 层: 白名单匹配]--+
+  |                          |
+  |  匹配来源（matchSource）:
+  |  wildcard     - 通配符 "*" 匹配所有
+  |  id           - 平台用户 ID
+  |  name         - 显示名称
+  |  tag          - 用户标签 (如 Discord#1234)
+  |  username     - 用户名
+  |  prefixed-id  - 带前缀的 ID (如 "tg:12345")
+  |  prefixed-user- 带前缀的用户名
+  |  prefixed-name- 带前缀的名称
+  |  slug         - Slug 形式
+  |  localpart    - 本地部分 (如 Matrix @user)
+  |                          |
+  +-----+------ 通过? -------+
+        |
+        v
+  +--[第 3 层: 命令门控]--+
+  |                        |
+  |  resolveControlCommandGate():
+  |
+  |  useAccessGroups?
+  |  +--- 是: authorizers 中需 configured && allowed
+  |  +--- 否: 根据 modeWhenAccessGroupsOff:
+  |            "allow"      -> 放行
+  |            "deny"       -> 拒绝
+  |            "configured" -> 有配置则检查，无配置则放行
+  |
+  |  shouldBlock = allowTextCommands
+  |              && hasControlCommand
+  |              && !commandAuthorized
+  |                        |
+  +-----+------ 通过? -----+
+        |
+        v
+  +--[第 4 层: @提及门控 (群聊)]--+
+  |                                |
+  |  resolveMentionGatingWithBypass():
+  |
+  |  requireMention && canDetectMention?
+  |  +--- wasMentioned?         -> 通过
+  |  +--- implicitMention?      -> 通过
+  |  +--- shouldBypassMention?  -> 通过
+  |       (授权命令发送者在群中
+  |        发送控制命令时绕过)
+  |  +--- 否 -> shouldSkip=true -> 忽略
+  |                                |
+  +-----+------ 通过? ------------+
+        |
+        v
+  +--[第 5 层: 确认反应]--+
+  |                        |
+  |  shouldAckReaction():
+  |
+  |  scope (配置):
+  |  "all"            -> 始终添加反应
+  |  "direct"         -> 仅私聊添加
+  |  "group-all"      -> 群聊全部添加
+  |  "group-mentions" -> 群聊中被 @提及时添加
+  |  "off" / "none"   -> 从不添加
+  |
+  |  WhatsApp 特殊模式:
+  |  shouldAckReactionForWhatsApp()
+  |  groupMode: "always" / "mentions" / "never"
+  +---+------------------------------------+
+      |                                    |
+      v                                    v
+  添加 emoji 反应                    继续处理消息
+  (回复后可自动移除)
+```
+
+### 11.6 路由与会话键
+
+路由引擎（`src/routing/resolve-route.ts`）根据消息的来源信息
+决定将消息分配给哪个 Agent，并构建会话键用于持久化。
+
+#### 路由优先级
+
+```
+  消息输入: { channel, accountId, peer, parentPeer, guildId, teamId }
+                     |
+                     v
+            筛选适用的 bindings
+            (channel + accountId 匹配)
+                     |
+        +------------+------------+
+        |            |            |
+        v            v            v
+  优先级 1:       优先级 2:      优先级 3:
+  Peer 绑定      Parent Peer   Guild 绑定
+  (精确匹配       绑定 (线程     (服务器级
+   发送者)        父级继承)      绑定)
+        |            |            |
+        v            v            v
+  优先级 4:       优先级 5:      优先级 6:
+  Team 绑定      Account 绑定   Channel 绑定
+  (团队级         (账号级         (accountId=*
+   绑定)          绑定)           通配)
+        |            |            |
+        +-----+------+-----+-----+
+              |             |
+              v             v
+         找到绑定?      优先级 7:
+              |        默认 Agent
+              v        (resolveDefaultAgentId)
+  pickFirstExistingAgentId(agentId)
+              |
+              v
+  buildAgentSessionKey({agentId, channel, accountId, peer, dmScope})
+              |
+              v
+  返回: { agentId, sessionKey, mainSessionKey, matchedBy }
+```
+
+#### 会话键构建规则
+
+会话键格式取决于 `dmScope` 配置和 `peerKind`：
+
+```
+  peerKind == "dm" ?
+  +--- dmScope:
+  |    "main"                     -> agent:<agentId>:main
+  |    "per-peer"                 -> agent:<agentId>:dm:<peerId>
+  |    "per-channel-peer"         -> agent:<agentId>:<channel>:dm:<peerId>
+  |    "per-account-channel-peer" -> agent:<agentId>:<channel>:<accountId>:dm:<peerId>
+  |
+  peerKind == "group" / "channel" ?
+  +--- agent:<agentId>:<channel>:<peerKind>:<peerId>
+
+  线程追加:
+  +--- :thread:<threadId>
+
+  跨频道身份链接:
+  identityLinks: { "alice": ["telegram:123", "discord:456"] }
+  -> 不同频道的同一用户共享同一会话键
+```
+
+### 11.7 核心频道 vs 扩展频道
+
+```
+  +-------------------------------+     +-------------------------------+
+  |         核心频道                |     |         扩展频道               |
+  |                               |     |                               |
+  |  编译进主包                    |     |  独立 workspace 包            |
+  |  src/telegram/                |     |  extensions/discord/          |
+  |  src/discord/                 |     |  extensions/msteams/          |
+  |  src/slack/                   |     |  extensions/matrix/           |
+  |  src/signal/                  |     |  extensions/zalo/             |
+  |  src/imessage/                |     |  extensions/voice-call/       |
+  |  src/web/ (WhatsApp)          |     |  ...                         |
+  |  src/line/ (LINE)             |     |                               |
+  |                               |     |  通过插件 SDK 注册:            |
+  |  直接导入频道模块               |     |  api.registerChannel({        |
+  |  硬编码在 DOCKS 和             |     |    plugin: channelPlugin      |
+  |  CHAT_CHANNEL_ORDER 中        |     |  })                           |
+  |                               |     |                               |
+  |  Dock: 硬编码在                |     |  Dock: 运行时通过              |
+  |  dock.ts 的 DOCKS 对象        |     |  buildDockFromPlugin()        |
+  |                               |     |  从 ChannelPlugin 生成        |
+  +-------------------------------+     +-------------------------------+
+           |                                     |
+           +------ 统一的 ChannelPlugin 接口 ------+
+           |                                     |
+           v                                     v
+  +---------------------------------------------------------------+
+  |                     共享基础设施                                 |
+  |  allowlist-match  command-gating  mention-gating  ack-reactions |
+  |  routing          session-key     dock            registry      |
+  +---------------------------------------------------------------+
+```
+
+#### 扩展频道加载流程
+
+```
+  1. 网关启动
+     |
+     v
+  2. loadGatewayPlugins()
+     |
+     v
+  3. discovery.ts: 扫描 extensions/ 和 node_modules/
+     |
+     v
+  4. manifest.ts: 解析插件元数据 (package.json + 入口文件)
+     |
+     v
+  5. loader.ts: 通过 jiti 加载插件入口
+     |
+     +--- 插件入口代码:
+     |    export default function activate(api: PluginApi) {
+     |      api.registerChannel({ plugin: myChannelPlugin });
+     |    }
+     |
+     v
+  6. registry.ts: 存入中央注册表
+     |
+     v
+  7. createChannelManager() 遍历 listChannelPlugins()
+     |  -> 扩展频道与核心频道统一处理
+     v
+  8. startChannel(extensionChannelId) -> plugin.gateway.startAccount()
+```
+
+#### 扩展频道运行时委托模式
+
+扩展频道常使用 **惰性运行时委托** 模式，避免在插件加载时访问尚未初始化的运行时：
+
+```
+  // extensions/discord/src/runtime.ts (示意)
+
+  let cachedRuntime: ChannelRuntime | null = null;
+
+  function getRuntime(): ChannelRuntime {
+    if (!cachedRuntime) {
+      cachedRuntime = requireActivePluginRegistry().channel.discord;
+    }
+    return cachedRuntime;
+  }
+
+  // 在适配器中使用:
+  const gateway: ChannelGatewayAdapter = {
+    startAccount: async (ctx) => {
+      return getRuntime().startAccount(ctx);  // 惰性获取运行时
+    }
+  };
+```
+
+### 11.8 消息安全流示例（Discord 群聊完整流程）
+
+以一条 Discord 群聊消息为例，展示完整的安全检查链：
+
+```
+  Discord 用户在群聊中发送: "@OpenClaw /config set model gpt-4o"
+     |
+     v
+  [1] discord.js 事件到达，Grammy/Bot 框架解析
+     |
+     v
+  [2] 去重: 检查 messageId 是否已处理 -> 通过（新消息）
+     |
+     v
+  [3] 提取元数据:
+      senderId  = "user#1234"
+      chatType  = "channel" (Discord 文字频道)
+      chatId    = "guild-channel-123"
+      guildId   = "guild-456"
+      mentioned = true (检测到 @OpenClaw)
+      command   = "/config set model gpt-4o" (控制命令)
+     |
+     v
+  [4] DM 策略: 跳过（不是 DM，是群聊）
+     |
+     v
+  [5] 白名单: 群聊场景下通常由群聊策略而非白名单控制
+     |
+     v
+  [6] 命令门控:
+      useAccessGroups = true
+      authorizers = [{ configured: true, allowed: true }]  (用户在管理组中)
+      -> commandAuthorized = true
+      -> shouldBlock = false
+     |
+     v
+  [7] @提及门控:
+      isGroup = true
+      requireMention = true (Discord 群聊默认需要 @提及)
+      wasMentioned = true (检测到 @OpenClaw)
+      -> shouldSkip = false -> 通过
+     |
+     v
+  [8] 确认反应:
+      scope = "group-mentions"
+      effectiveWasMentioned = true
+      -> shouldAckReaction = true -> 添加 emoji 反应
+     |
+     v
+  [9] 路由:
+      resolveAgentRoute({
+        channel: "discord", accountId: "default",
+        peer: { kind: "channel", id: "guild-channel-123" },
+        guildId: "guild-456"
+      })
+      -> matchedBy: "binding.guild" -> agentId: "main"
+      -> sessionKey: "agent:main:discord:channel:guild-channel-123"
+     |
+     v
+  [10] 执行命令: 设置 model = gpt-4o
+       |
+       v
+       响应: "已将模型设置为 gpt-4o"
+       |
+       v
+  [11] outbound.sendText() 投递回复
+       -> 分块检查 (2000 字符限制)
+       -> 线程处理 (replyToMode)
+       -> 移除确认反应 (removeAckReactionAfterReply)
+```
+
+### 11.9 频道能力矩阵
+
+| 能力 | Telegram | WhatsApp | Discord | Slack | Signal | iMessage | LINE | Google Chat |
+|------|----------|----------|---------|-------|--------|----------|------|------------|
+| 私聊 | Y | Y | Y | Y | Y | Y | Y | Y |
+| 群聊 | Y | Y | - | - | Y | Y | - | Y |
+| 频道/文字频道 | Y | - | Y | Y | - | - | - | - |
+| 线程 | Y | - | Y | Y | - | - | - | Y |
+| 原生命令 | Y | - | Y | Y | - | - | - | - |
+| 投票 | - | Y | Y | - | - | - | - | - |
+| 反应 | - | Y | Y | Y | Y | Y | - | Y |
+| 媒体 | - | Y | Y | Y | Y | Y | - | Y |
+| 块流式输出 | Y | - | - | - | - | - | - | Y |
+| 流式合并 | - | - | Y | Y | Y | - | - | - |
+| QR 码登录 | - | Y | - | - | Y | - | Y | - |
+
+### 11.10 频道架构设计原则
+
+1. **适配器组合优于继承**：通过 ~20 个可选适配器组合频道行为，而非使用类继承
+2. **多账号原生支持**：每个频道天然支持多账号，每个账号独立生命周期
+3. **核心与扩展统一接口**：核心频道和扩展频道实现同一个 `ChannelPlugin` 接口
+4. **轻量 Dock 与重量 Plugin 分离**：共享代码使用轻量 `ChannelDock`，避免加载完整插件
+5. **安全层层递进**：DM 策略 → 白名单 → 命令门控 → @提及门控 → 确认反应
+6. **灵活路由绑定**：7 级绑定优先级，支持从精确用户到默认 Agent 的逐级回退
+7. **可配置的会话隔离**：通过 `dmScope` 控制会话粒度，从全局共享到按账号-频道-用户隔离
+8. **跨频道身份链接**：`identityLinks` 支持将不同平台的同一用户映射到同一会话
