@@ -6,132 +6,75 @@
 
 ## 1. 系统顶层架构
 
-```mermaid
-graph TB
-    subgraph Users["用户与客户端"]
-        TG[Telegram]
-        DC[Discord]
-        SL[Slack]
-        SG[Signal]
-        IM[iMessage]
-        WA[WhatsApp]
-        LN[LINE]
-        WEB[Web UI]
-        EXT_CH["扩展频道<br/>(Teams, Matrix, Zalo, ...)"]
-    end
+```
++-----------------------------------------------------------------------+
+|                          用户与客户端                                    |
+|  Telegram  Discord  Slack  Signal  iMessage  WhatsApp  LINE  Web UI   |
+|                    Teams  Matrix  Zalo  ...                            |
++-----+---------+---------+--------+---------+---------+-------+--------+
+      |         |         |        |         |         |       |
+      v         v         v        v         v         v       v
++-----+---------+---------+--------+---------+---------+-------+--------+
+|                           频道层                                       |
+|  +-------------+  +-----------+  +---------------+  +-------------+   |
+|  | 频道注册表   |  | 频道插件  |  | 白名单 / 门控  |  | 路由 / 绑定  |   |
+|  +-------------+  +-----------+  +---------------+  +------+------+   |
++-----------------------------------------------------------|------------+
+                                                             |
+              +----------------------------------------------+
+              |
+              v
++-------------+-----------------------------------------------------+
+|                          网关服务器                                  |
+|  +----------------+  +--------------+  +-----------------+         |
+|  | Hono HTTP 服务器 |  | WebSocket    |  | RPC 方法处理器   |         |
+|  +----------------+  +--------------+  +-----------------+         |
+|  +------------+  +----------+  +----------+  +-----------+        |
+|  | 频道管理器  |  | 运行时状态 |  | 模型目录  |  | 定时任务  |        |
+|  +------------+  +----------+  +----------+  +-----------+        |
+|  +-------------+  +-------------+                                  |
+|  | mDNS 发现   |  | 边车服务    |                                  |
+|  +-------------+  +-------------+                                  |
++--------------------------+------------------------------------------+
+                           |
+              +------------+-------------+
+              |                          |
+              v                          v
++-------------+------------+  +---------+---------------------------+
+|      Agent 运行时         |  |           插件系统                   |
+|  +-------------------+   |  |  +----------+  +-----------+        |
+|  | Pi Agent 核心       |   |  |  | 插件发现  |  | 插件加载器 |        |
+|  | (@mariozechner/pi) |   |  |  +----------+  +-----------+        |
+|  +-------------------+   |  |  +----------+  +-----------+        |
+|  +-----------+           |  |  | 插件注册表 |  | 插件 SDK   |        |
+|  | 工具注册表 |           |  |  +----------+  +-----------+        |
+|  +-----------+           |  +-------------------------------------+
+|  +-----------+           |
+|  | Agent 工作区|          |
+|  +-----------+           |
+|  +----------+ +--------+ |
+|  | 会话管理器 | | 记忆   | |
+|  +----------+ +--------+ |
+|  +----------+            |
+|  | 沙箱环境  |            |
+|  +----------+            |
++--------------------------+
 
-    subgraph CLI["CLI 层"]
-        ENTRY[entry.ts<br/>入口]
-        PROGRAM[Commander 程序]
-        SUBCMDS["子命令<br/>agent, send, config, status, ..."]
-    end
-
-    subgraph Gateway["网关服务器"]
-        GW_HTTP[Hono HTTP 服务器]
-        GW_WS[WebSocket 服务器]
-        GW_RPC[RPC 方法处理器]
-        GW_CHAN_MGR[频道管理器]
-        GW_STATE[运行时状态]
-        GW_DISC[mDNS 发现]
-        GW_CRON[定时任务服务]
-        GW_MODEL[模型目录]
-    end
-
-    subgraph Agents["Agent 运行时"]
-        PI_CORE["Pi Agent 核心<br/>(@mariozechner/pi-*)"]
-        TOOLS[工具注册表]
-        WORKSPACE[Agent 工作区]
-        SESSIONS[会话管理器]
-        MEMORY["记忆 / 搜索"]
-        SANDBOX[沙箱环境]
-    end
-
-    subgraph Channels["频道层"]
-        CH_REG[频道注册表]
-        CH_PLUGINS[频道插件]
-        CH_ALLOW["白名单 / 门控"]
-        CH_ROUTING["路由 / 绑定"]
-    end
-
-    subgraph Plugins["插件系统"]
-        PL_DISC[插件发现]
-        PL_LOAD[插件加载器]
-        PL_REG[插件注册表]
-        PL_SDK[插件 SDK]
-    end
-
-    subgraph Infra["基础设施"]
-        CONFIG[配置管理器]
-        MEDIA[媒体管道]
-        LOGGING[日志系统]
-        SECURITY[安全模块]
-        PROVIDERS[LLM 提供方]
-        TLS["TLS / 隧道"]
-    end
-
-    subgraph Apps["原生应用"]
-        MACOS[macOS 菜单栏应用]
-        IOS[iOS 应用]
-        ANDROID[Android 应用]
-    end
-
-    subgraph WebUI["Web 控制台"]
-        LIT[Lit 组件]
-        VITE[Vite 开发服务器]
-    end
-
-    %% 用户连接
-    TG & DC & SL & SG & IM & WA & LN --> CH_PLUGINS
-    EXT_CH --> CH_PLUGINS
-    WEB --> GW_HTTP
-
-    %% CLI 流程
-    ENTRY --> PROGRAM --> SUBCMDS
-    SUBCMDS --> Gateway
-    SUBCMDS --> Channels
-
-    %% 网关编排
-    GW_HTTP --> GW_WS --> GW_RPC
-    GW_RPC --> GW_CHAN_MGR
-    GW_RPC --> Agents
-    GW_CHAN_MGR --> CH_PLUGINS
-    GW_RPC --> GW_MODEL
-
-    %% 频道流程
-    CH_PLUGINS --> CH_REG
-    CH_PLUGINS --> CH_ALLOW
-    CH_PLUGINS --> CH_ROUTING
-    CH_ROUTING --> Agents
-
-    %% Agent 流程
-    PI_CORE --> TOOLS
-    PI_CORE --> WORKSPACE
-    PI_CORE --> SESSIONS
-    PI_CORE --> MEMORY
-    TOOLS --> SANDBOX
-
-    %% 插件流程
-    PL_DISC --> PL_LOAD --> PL_REG
-    PL_SDK --> PL_REG
-    PL_REG --> CH_PLUGINS
-    PL_REG --> TOOLS
-    PL_REG --> GW_RPC
-
-    %% 基础设施
-    CONFIG --> Gateway
-    CONFIG --> Channels
-    MEDIA --> Channels
-    MEDIA --> Agents
-    PROVIDERS --> Agents
-    LOGGING --> Gateway
-
-    %% 原生应用
-    MACOS --> GW_WS
-    IOS --> GW_WS
-    ANDROID --> GW_WS
-
-    %% Web UI
-    WebUI --> GW_HTTP
++--------------------------+  +--------------------------+
+|       基础设施             |  |        原生应用           |
+|  +----------+ +--------+ |  |  +-------+  +-------+    |
+|  | 配置管理器 | | 媒体管道| |  |  | macOS |  |  iOS  |    |
+|  +----------+ +--------+ |  |  +---+---+  +---+---+    |
+|  +-------+ +------+      |  |      |          |        |
+|  | 日志   | | 安全  |      |  |  +---+---+  +---+---+    |
+|  +-------+ +------+      |  |  | Android|  | Web UI|    |
+|  +----------+ +--------+ |  |  +---+---+  +---+---+    |
+|  | LLM 提供方 | | TLS   | |  |      |          |        |
+|  +----------+ +--------+ |  |      +----+-----+        |
++--------------------------+  |           |               |
+                              |     WebSocket 连接         |
+                              |     到网关服务器            |
+                              +--------------------------+
 ```
 
 ---
@@ -140,35 +83,41 @@ graph TB
 
 收发消息的核心数据流：
 
-```mermaid
-sequenceDiagram
-    participant User as 用户 (Telegram/Discord/...)
-    participant Channel as 频道监听器
-    participant Router as 路由引擎
-    participant Agent as Pi Agent
-    participant Tools as 工具注册表
-    participant LLM as LLM 提供方
-    participant Send as 频道发送器
-
-    User->>Channel: 收到消息
-    Channel->>Channel: 解析事件，提取文本/媒体
-    Channel->>Router: resolveAgentRoute(channel, peer, account)
-    Router->>Router: 检查绑定 (peer -> guild -> account -> channel)
-    Router-->>Agent: agentId + sessionKey
-
-    Agent->>Agent: 加载会话上下文
-    Agent->>LLM: 发送 prompt + 历史
-    LLM-->>Agent: 返回响应（可能包含工具调用）
-
-    opt 工具调用
-        Agent->>Tools: 执行工具
-        Tools-->>Agent: 工具结果
-        Agent->>LLM: 发送工具结果
-        LLM-->>Agent: 最终响应
-    end
-
-    Agent->>Send: sendMessage(channel, peer, response)
-    Send->>User: 投递回复
+```
+  用户                 频道监听器         路由引擎          Pi Agent         工具注册表       LLM 提供方        频道发送器
+   |                     |                 |                 |                 |                |                |
+   |--- 发送消息 -------->|                 |                 |                 |                |                |
+   |                     |                 |                 |                 |                |                |
+   |                     |-- 解析事件 ----->|                 |                 |                |                |
+   |                     |  提取文本/媒体   |                 |                 |                |                |
+   |                     |                 |                 |                 |                |                |
+   |                     |   resolveAgentRoute(channel,      |                 |                |                |
+   |                     |-- peer, account) --------------->|                 |                |                |
+   |                     |                 |                 |                 |                |                |
+   |                     |                 |-- 检查绑定 ----->|                 |                |                |
+   |                     |                 |  peer -> guild   |                 |                |                |
+   |                     |                 |  -> account      |                 |                |                |
+   |                     |                 |  -> channel      |                 |                |                |
+   |                     |                 |                 |                 |                |                |
+   |                     |                 |  agentId +       |                 |                |                |
+   |                     |                 |<- sessionKey ----|                 |                |                |
+   |                     |                 |                 |                 |                |                |
+   |                     |                 |                 |-- 加载会话 ----->|                |                |
+   |                     |                 |                 |                 |                |                |
+   |                     |                 |                 |-- prompt+历史 --|--------------->|                |
+   |                     |                 |                 |                 |                |                |
+   |                     |                 |                 |<-- 响应（可能含工具调用）---------|                |
+   |                     |                 |                 |                 |                |                |
+   |                     |                 |                 |    [若有工具调用]                 |                |
+   |                     |                 |                 |-- 执行工具 ---->|                |                |
+   |                     |                 |                 |<-- 工具结果 ----|                |                |
+   |                     |                 |                 |-- 工具结果 -----|--------------->|                |
+   |                     |                 |                 |<-- 最终响应 ----|----------------|                |
+   |                     |                 |                 |                 |                |                |
+   |                     |                 |                 |--- sendMessage(channel, peer, response) -------->|
+   |                     |                 |                 |                 |                |                |
+   |<----------- 投递回复 -------------------------------------------------------------------|                |
+   |                     |                 |                 |                 |                |                |
 ```
 
 ---
@@ -177,456 +126,383 @@ sequenceDiagram
 
 ### 3.1 CLI 模块 (`src/cli/`)
 
-```mermaid
-graph TB
-    subgraph Entry["入口"]
-        ENTRY_TS["entry.ts<br/>Node 重启器"]
-        INDEX_TS["index.ts<br/>buildProgram"]
-    end
-
-    subgraph Program["程序注册"]
-        REG["register.subclis.ts<br/>懒加载子命令"]
-        HELP[configureProgramHelp]
-        HOOKS[registerPreActionHooks]
-    end
-
-    subgraph Commands["命令组"]
-        AGENT["agent<br/>TUI / CLI / RPC 模式"]
-        MSG["message / send<br/>发送消息"]
-        GW_CMD["gateway<br/>run, register, discover"]
-        STATUS["status / health<br/>系统状态"]
-        CONFIG_CMD["config<br/>读取、设置、编辑"]
-        ONBOARD["onboard / setup<br/>初始化向导"]
-        CHANNELS["channels<br/>登录、登出、状态"]
-        MODELS["models<br/>配置 LLM 模型"]
-        PLUGINS_CMD["plugins<br/>安装、列表、移除"]
-        SKILLS["skills<br/>列表、启用、禁用"]
-        BROWSER["browser<br/>浏览器工具"]
-        NODES["nodes<br/>远程节点管理"]
-        MEMORY_CMD["memory<br/>记忆搜索"]
-        TUI_CMD["tui<br/>终端 UI 聊天"]
-    end
-
-    subgraph Deps["依赖注入"]
-        CLI_DEPS["createDefaultDeps<br/>CliDeps 工厂"]
-        SEND_DEPS[createOutboundSendDeps]
-    end
-
-    ENTRY_TS --> INDEX_TS
-    INDEX_TS --> Program
-    REG --> Commands
-    CLI_DEPS --> SEND_DEPS
-    Commands --> CLI_DEPS
+```
+                          +-------------------+
+                          |     entry.ts      |
+                          |   (Node 重启器)    |
+                          +---------+---------+
+                                    |
+                                    v
+                          +-------------------+
+                          |     index.ts      |
+                          |  (buildProgram)   |
+                          +---------+---------+
+                                    |
+                   +----------------+----------------+
+                   |                                 |
+                   v                                 v
+  +----------------+----------------+   +------------+-------------+
+  |          程序注册                 |   |        依赖注入           |
+  |                                 |   |                          |
+  |  register.subclis.ts            |   |  createDefaultDeps()     |
+  |    (懒加载子命令)                 |   |    -> CliDeps 工厂       |
+  |  configureProgramHelp           |   |                          |
+  |  registerPreActionHooks         |   |  createOutboundSendDeps  |
+  +-----------------+---------------+   +--------------------------+
+                    |
+                    v
+  +-----------------+-----------------------------------------------+
+  |                          命令组                                   |
+  |                                                                  |
+  |  agent         - TUI / CLI / RPC 模式                             |
+  |  message/send  - 发送消息            models   - 配置 LLM 模型     |
+  |  gateway       - run/register/disc   plugins  - 安装/列表/移除    |
+  |  status/health - 系统状态            skills   - 列表/启用/禁用    |
+  |  config        - 读取/设置/编辑      browser  - 浏览器工具        |
+  |  onboard/setup - 初始化向导          nodes    - 远程节点管理      |
+  |  channels      - 登录/登出/状态      memory   - 记忆搜索          |
+  |  tui           - 终端 UI 聊天                                     |
+  +------------------------------------------------------------------+
 ```
 
 ### 3.2 网关模块 (`src/gateway/`)
 
-```mermaid
-graph TB
-    subgraph Init["初始化"]
-        IMPL["server.impl.ts<br/>主编排器"]
-        LOAD_CFG[loadConfig]
-        LOAD_PLUGINS[loadGatewayPlugins]
-        LOAD_MODELS[loadGatewayModelCatalog]
-    end
-
-    subgraph Server["HTTP/WS 服务器"]
-        HONO[Hono HTTP 应用]
-        WS[WebSocket 升级]
-        AUTH[设备认证]
-        HEALTH[健康检查端点]
-    end
-
-    subgraph Methods["RPC 方法"]
-        CHAT[chat]
-        TOOL_RES[tool_result]
-        PROBE[probe]
-        CHAN_CTRL["频道控制<br/>start, stop, status"]
-        PLUGIN_M[插件贡献的方法]
-    end
-
-    subgraph Managers["服务管理器"]
-        CHAN_MGR["频道管理器<br/>按账号 start/stop/status"]
-        NODE_MGR[节点订阅管理器]
-        APPROVAL[执行审批处理器]
-        RUNTIME[网关运行时状态]
-        SIDECARS["边车服务<br/>Browser, Canvas"]
-    end
-
-    subgraph Protocol["协议"]
-        ENCODE[协议编码]
-        DECODE[协议解码]
-        SCHEMA[消息 Schema]
-    end
-
-    IMPL --> LOAD_CFG --> LOAD_PLUGINS --> LOAD_MODELS
-    IMPL --> Server
-    HONO --> WS --> Methods
-    Methods --> Managers
-    CHAN_MGR --> Protocol
-    WS --> Protocol
+```
+  +---------------------------------------------------------------------+
+  |                        初始化流程                                     |
+  |                                                                      |
+  |  server.impl.ts (主编排器)                                            |
+  |       |                                                              |
+  |       +---> loadConfig                                               |
+  |       |         |                                                    |
+  |       |         +---> loadGatewayPlugins                             |
+  |       |                    |                                         |
+  |       |                    +---> loadGatewayModelCatalog              |
+  |       |                                                              |
+  |       +---> 启动 HTTP/WS 服务器                                       |
+  +---------|------------------------------------------------------------+
+            |
+            v
+  +---------+-----------------------------------------------------------+
+  |                    HTTP/WS 服务器                                     |
+  |                                                                      |
+  |  +------------------+     +--------------------+                     |
+  |  | Hono HTTP 应用    | --> | WebSocket 升级      |                     |
+  |  +------------------+     +--------+-----------+                     |
+  |  +------------------+              |                                 |
+  |  | 设备认证          |              v                                 |
+  |  +------------------+     +--------+-----------+                     |
+  |  +------------------+     |   RPC 方法          |                     |
+  |  | 健康检查端点       |     |  chat, tool_result  |                     |
+  |  +------------------+     |  probe, 频道控制     |                     |
+  |                           |  插件贡献的方法      |                     |
+  |                           +--------+-----------+                     |
+  +------------------------------------+-----+--------------------------+
+                                       |     |
+                          +------------+     +-----------+
+                          v                              v
+  +-----------------------+--+            +--------------+----------+
+  |      服务管理器           |            |        协议              |
+  |                          |            |                         |
+  |  频道管理器               |            |  协议编码 / 协议解码      |
+  |    (按账号 start/stop)   |            |  消息 Schema             |
+  |  节点订阅管理器           |            +-------------------------+
+  |  执行审批处理器           |
+  |  网关运行时状态           |
+  |  边车服务 (Browser/Canvas)|
+  +--------------------------+
 ```
 
 ### 3.3 频道层 (`src/channels/` + `src/telegram/`、`src/discord/` 等)
 
-```mermaid
-graph TB
-    subgraph Registry["频道注册表"]
-        REG["registry.ts<br/>CHAT_CHANNEL_ORDER"]
-        PLUGIN_TYPE[ChannelPlugin 接口]
-    end
-
-    subgraph Shared["共享基础设施"]
-        ALLOW["allowlist/<br/>访问控制"]
-        GATING["command-gating.ts<br/>mention-gating.ts"]
-        ACK[ack-reactions.ts]
-        SENDER[sender-identity.ts]
-        LABEL[conversation-label.ts]
-        PREFIX[reply-prefix.ts]
-    end
-
-    subgraph CoreChannels["核心频道实现"]
-        TG_MOD["telegram/<br/>monitor, send, probe"]
-        DC_MOD["discord/<br/>monitor, send, probe"]
-        SL_MOD["slack/<br/>monitor, send, probe"]
-        SG_MOD["signal/<br/>monitor, send, probe"]
-        IM_MOD["imessage/<br/>monitor, send, probe"]
-        WA_MOD["web/ (WhatsApp)<br/>monitor, send, probe"]
-        LN_MOD["line/<br/>monitor, send, probe"]
-    end
-
-    subgraph ExtChannels["扩展频道插件"]
-        TEAMS[msteams]
-        MATRIX[matrix]
-        GCHAT[googlechat]
-        ZALO[zalo]
-        NOSTR[nostr]
-        TLON[tlon]
-        MORE[...]
-    end
-
-    REG --> CoreChannels
-    REG --> ExtChannels
-    PLUGIN_TYPE --> CoreChannels
-    PLUGIN_TYPE --> ExtChannels
-    Shared --> CoreChannels
-    Shared --> ExtChannels
+```
+  +---------------------------------------+
+  |          频道注册表                      |
+  |                                        |
+  |  registry.ts (CHAT_CHANNEL_ORDER)      |
+  |  ChannelPlugin 接口                    |
+  +---+------------------------------------+
+      |
+      +-------------------------------+
+      |                               |
+      v                               v
+  +---+---------------------------+  ++-------------------------------+
+  |    核心频道实现                 |  |     扩展频道插件                 |
+  |                               |  |                                |
+  |  telegram/  (monitor/send/probe)|  |  msteams    googlechat        |
+  |  discord/   (monitor/send/probe)|  |  matrix     nextcloud-talk    |
+  |  slack/     (monitor/send/probe)|  |  zalo       tlon              |
+  |  signal/    (monitor/send/probe)|  |  nostr      twitch            |
+  |  imessage/  (monitor/send/probe)|  |  zalouser   lobster           |
+  |  web/       (monitor/send/probe)|  |  mattermost bluebubbles       |
+  |  line/      (monitor/send/probe)|  |  ...                          |
+  +------+------------------------+  +------+-------------------------+
+         |                                   |
+         +----------------+------------------+
+                          |
+                          v
+  +-----------------------+--------------------------------------------+
+  |                    共享基础设施                                       |
+  |                                                                     |
+  |  allowlist/         - 访问控制        sender-identity.ts             |
+  |  command-gating.ts  - 命令门控        conversation-label.ts          |
+  |  mention-gating.ts  - @提及门控       reply-prefix.ts                |
+  |  ack-reactions.ts   - 确认反应                                       |
+  +---------------------------------------------------------------------+
 ```
 
 ### 3.4 Agent 运行时 (`src/agents/`)
 
-```mermaid
-graph TB
-    subgraph Core["Agent 核心"]
-        PI["Pi Agent Core<br/>@mariozechner/pi-agent-core"]
-        PI_AI["Pi AI<br/>@mariozechner/pi-ai"]
-        PI_CODING["Pi Coding Agent<br/>@mariozechner/pi-coding-agent"]
-    end
-
-    subgraph Runners["Agent 运行器"]
-        CLI_RUN["cli-runner/<br/>CLI Agent 执行"]
-        EMBED_RUN["pi-embedded-runner/<br/>内嵌运行时"]
-        EMBED_HELP["pi-embedded-helpers/<br/>清洗、工具函数"]
-        EMBED_SUB["pi-embedded-subscribe/<br/>流处理"]
-    end
-
-    subgraph ToolSystem["工具系统"]
-        TOOL_REG["tools/<br/>工具定义"]
-        TOOL_POLICY["工具策略与审批"]
-        BASH_TOOL[Bash 工具执行]
-        SKILL_TOOLS[技能贡献的工具]
-        PLUGIN_TOOLS[插件贡献的工具]
-    end
-
-    subgraph State["状态管理"]
-        AUTH_PROF["auth-profiles/<br/>认证配置管理"]
-        SESSIONS_MGR[会话管理]
-        SCHEMA_VAL["schema/<br/>Schema 校验器"]
-        SANDBOX_ENV["sandbox/<br/>沙箱配置"]
-    end
-
-    subgraph Skills["技能系统"]
-        SKILL_REG["skills/<br/>技能注册表"]
-        SKILL_55["55 个技能包<br/>(apple-notes, spotify, github, ...)"]
-    end
-
-    Core --> Runners
-    Runners --> ToolSystem
-    Runners --> State
-    ToolSystem --> Skills
-    SKILL_REG --> SKILL_55
-    PLUGIN_TOOLS --> ToolSystem
+```
+  +---------------------------------------------------------------------+
+  |                         Agent 核心                                    |
+  |                                                                      |
+  |  @mariozechner/pi-agent-core    (Pi Agent Core)                      |
+  |  @mariozechner/pi-ai            (Pi AI)                              |
+  |  @mariozechner/pi-coding-agent  (Pi Coding Agent)                    |
+  +---+------------------------------+----------------------------------+
+      |                              |
+      v                              v
+  +---+----------------------------+ +----------------------------------+
+  |       Agent 运行器              | |          状态管理                 |
+  |                                | |                                  |
+  |  cli-runner/                   | |  auth-profiles/  (认证配置管理)   |
+  |    CLI Agent 执行               | |  会话管理                        |
+  |  pi-embedded-runner/           | |  schema/         (Schema 校验器) |
+  |    内嵌运行时                    | |  sandbox/        (沙箱配置)      |
+  |  pi-embedded-helpers/          | +----------------------------------+
+  |    清洗、工具函数                |
+  |  pi-embedded-subscribe/        |
+  |    流处理                       |
+  +---+----------------------------+
+      |
+      v
+  +---+----------------------------------------------------------------+
+  |                          工具系统                                     |
+  |                                                                      |
+  |  tools/          - 工具定义                                           |
+  |  工具策略与审批    - 执行权限控制                                       |
+  |  Bash 工具执行    - Shell 命令                                        |
+  |  技能贡献的工具    <--- skills/ (55 个技能包)                           |
+  |  插件贡献的工具    <--- plugins/ (扩展注册)                             |
+  +---------------------------------------------------------------------+
+      |
+      v
+  +---+----------------------------------------------------------------+
+  |                         技能系统                                      |
+  |                                                                      |
+  |  skills/ (技能注册表) ---> 55 个技能包                                 |
+  |    apple-notes, spotify, github, coding-agent,                       |
+  |    weather, 1password, openai-whisper, ...                           |
+  +---------------------------------------------------------------------+
 ```
 
 ### 3.5 插件系统 (`src/plugins/`)
 
-```mermaid
-graph TB
-    subgraph Discovery["发现"]
-        DISC["discovery.ts<br/>扫描 extensions/, node_modules"]
-        MANIFEST["manifest.ts<br/>解析插件元数据"]
-    end
-
-    subgraph Loading["加载"]
-        LOADER["loader.ts<br/>加载 + 注册"]
-        BUNDLED["bundled-dir/<br/>内置插件"]
-    end
-
-    subgraph Registry["注册表"]
-        REG["registry.ts<br/>中央注册存储"]
-        TOOL_R[工具注册]
-        CLI_R[CLI 注册]
-        CHAN_R[频道注册]
-        PROV_R[提供方注册]
-        HOOK_R[钩子注册]
-        HTTP_R[HTTP 路由注册]
-        GW_R[网关处理器注册]
-    end
-
-    subgraph SDK["插件 SDK（导出）"]
-        SDK_CHAN["频道类型与适配器"]
-        SDK_API[插件 API]
-        SDK_GW[网关类型]
-        SDK_CFG[配置 Schema]
-    end
-
-    subgraph Runtime["运行时"]
-        RT["runtime/<br/>插件生命周期"]
-        SVC[服务管理]
-    end
-
-    DISC --> MANIFEST --> LOADER
-    LOADER --> REG
-    REG --> TOOL_R & CLI_R & CHAN_R & PROV_R & HOOK_R & HTTP_R & GW_R
-    SDK --> LOADER
-    REG --> Runtime
+```
+  +-----------------+     +------------------+
+  |   discovery.ts  |     |   manifest.ts    |
+  |  扫描 extensions |---->|  解析插件元数据    |
+  |  & node_modules |     +--------+---------+
+  +-----------------+              |
+                                   v
+  +-----------------+     +--------+---------+
+  |  插件 SDK（导出） |     |    loader.ts     |
+  |                 |---->|   加载 + 注册      |
+  |  频道类型/适配器  |     +--------+---------+
+  |  插件 API        |              |
+  |  网关类型         |              v
+  |  配置 Schema     |     +--------+---------+
+  +-----------------+     |    registry.ts    |
+                          |   中央注册存储      |
+                          +--------+---------+
+                                   |
+            +----------+-----------+-----------+----------+---------+
+            |          |           |           |          |         |
+            v          v           v           v          v         v
+        +------+  +------+  +--------+  +--------+  +------+  +------+
+        | 工具  |  | CLI  |  |  频道   |  | 提供方  |  | 钩子  |  | HTTP |
+        | 注册  |  | 注册  |  |  注册   |  |  注册   |  | 注册  |  | 路由 |
+        +------+  +------+  +--------+  +--------+  +------+  +------+
+                                                        |
+                          +------+                      |
+                          | 网关  |                      |
+                          | 处理器|<---------------------+
+                          | 注册  |
+                          +------+
+                                   |
+                                   v
+                          +--------+---------+
+                          |    runtime/      |
+                          |   插件生命周期     |
+                          |   服务管理        |
+                          +------------------+
 ```
 
 ### 3.6 媒体管道 (`src/media/`)
 
-```mermaid
-graph LR
-    subgraph Input["输入"]
-        FETCH["fetch.ts<br/>URL 下载"]
-        PARSE["parse.ts<br/>MIME 检测"]
-        INPUT_F["input-files.ts<br/>文件处理"]
-    end
-
-    subgraph Processing["处理"]
-        AUDIO["audio.ts<br/>编解码、标签"]
-        IMAGE["image-ops.ts<br/>Sharp 缩放"]
-        OPTIMIZE["优化为 JPEG"]
-    end
-
-    subgraph Storage["存储与服务"]
-        STORE["store.ts<br/>本地存储"]
-        HOST["host.ts<br/>确保托管 URL"]
-        SERVER[HTTP 媒体服务器]
-    end
-
-    subgraph Understanding["理解"]
-        MEDIA_U["media-understanding/<br/>视觉、OCR"]
-        LINK_U["link-understanding/<br/>链接预览"]
-    end
-
-    subgraph ChannelAdapters["频道适配"]
-        TG_M["Telegram: file_id 缓存"]
-        DC_M["Discord: 附件 URL"]
-        SL_M["Slack: 文件上传"]
-        WA_M["WhatsApp: base64"]
-        SG_M["Signal: 二进制上传"]
-    end
-
-    Input --> Processing --> Storage
-    Storage --> ChannelAdapters
-    Input --> Understanding
+```
+  输入                       处理                     存储与服务
+  +------------------+      +------------------+     +------------------+
+  | fetch.ts         |      | audio.ts         |     | store.ts         |
+  |  URL 下载         | ---> |  编解码、标签      | --> |  本地存储          |
+  | parse.ts         |      | image-ops.ts     |     | host.ts          |
+  |  MIME 检测        |      |  Sharp 缩放       |     |  确保托管 URL     |
+  | input-files.ts   |      | 优化为 JPEG       |     | HTTP 媒体服务器    |
+  |  文件处理         |      +------------------+     +--------+---------+
+  +--------+---------+                                         |
+           |                                                   |
+           |                                      +------------+------------+
+           v                                      |            |            |
+  +--------+---------+                   +--------+--+ +-------+-+ +-------+-+
+  |    理解            |                   | Telegram  | | Discord | | Slack   |
+  |                   |                   | file_id   | | 附件URL | | 文件上传 |
+  | media-understand/ |                   | 缓存      | +---------+ +---------+
+  |  视觉、OCR        |                   +-----------+
+  | link-understand/  |                   +-----------+ +-----------+
+  |  链接预览          |                   | WhatsApp  | | Signal    |
+  +-------------------+                   | base64    | | 二进制上传 |
+                                          +-----------+ +-----------+
 ```
 
 ### 3.7 路由引擎 (`src/routing/`)
 
-```mermaid
-graph TB
-    subgraph Input["路由输入"]
-        CHAN_ID["频道 ID"]
-        ACCOUNT["账号 ID"]
-        PEER["Peer / 发送者"]
-        GUILD["Guild / Team ID"]
-    end
-
-    subgraph Resolution["路由解析"]
-        RESOLVE["resolve-route.ts<br/>resolveAgentRoute"]
-        BINDINGS["bindings.ts<br/>基于配置的绑定"]
-        SESSION_KEY["session-key.ts<br/>构建会话键"]
-    end
-
-    subgraph Output["路由输出"]
-        AGENT_ID[Agent ID]
-        SESS_KEY["会话键"]
-        MATCH["匹配来源<br/>binding.peer / binding.guild / default"]
-    end
-
-    subgraph Binding["绑定优先级"]
-        B1["1. Peer 绑定"]
-        B2["2. Guild / Team 绑定"]
-        B3["3. Account 绑定"]
-        B4["4. Channel 绑定"]
-        B5["5. 默认 Agent"]
-    end
-
-    Input --> RESOLVE
-    RESOLVE --> BINDINGS
-    BINDINGS --> Binding
-    RESOLVE --> SESSION_KEY
-    RESOLVE --> Output
+```
+  路由输入                   路由解析                       路由输出
+  +---------------+         +------------------------+     +------------------+
+  | 频道 ID        |         |                        |     | Agent ID         |
+  | 账号 ID        | ------> | resolve-route.ts       | --> | 会话键            |
+  | Peer / 发送者  |         |   resolveAgentRoute    |     | 匹配来源          |
+  | Guild/Team ID |         |                        |     +------------------+
+  +---------------+         +--+---------------------+
+                               |
+                               v
+                    +----------+-----------+
+                    |   bindings.ts        |      绑定优先级:
+                    |  基于配置的绑定        |
+                    +----------+-----------+      1. Peer 绑定
+                               |                  2. Guild / Team 绑定
+                               v                  3. Account 绑定
+                    +----------+-----------+      4. Channel 绑定
+                    |   session-key.ts     |      5. 默认 Agent
+                    |  构建会话键           |
+                    +----------------------+
 ```
 
 ### 3.8 基础设施 (`src/infra/`)
 
-```mermaid
-graph TB
-    subgraph Network["网络"]
-        PORTS["ports.ts<br/>端口检测"]
-        NET["net/<br/>网络工具"]
-        OUTBOUND["outbound/<br/>HTTP 客户端"]
-        TLS_MOD["tls/<br/>TLS 管理"]
-        TAILSCALE[Tailscale 集成]
-        SSH[SSH 隧道]
-    end
-
-    subgraph Runtime["运行时"]
-        ENV[Shell 环境]
-        EXEC[进程执行]
-        PATHS[路径管理]
-        ERRORS[错误处理]
-        UPDATES[更新检查器]
-    end
-
-    subgraph Data["数据"]
-        ARCHIVE[归档管理]
-        MIGRATIONS[状态迁移]
-        PROVIDER_USAGE[提供方用量追踪]
-    end
-
-    subgraph Config["配置系统"]
-        CFG_LOAD["config.ts<br/>加载 JSON5"]
-        CFG_SCHEMA[Schema 校验]
-        CFG_MIGRATE[旧版迁移]
-    end
-
-    Network --> Runtime
-    Runtime --> Data
-    Config --> Runtime
+```
+  +-----------------------------------+     +-----------------------------+
+  |             网络                    |     |          配置系统            |
+  |                                   |     |                             |
+  |  ports.ts      - 端口检测          |     |  config.ts    - 加载 JSON5  |
+  |  net/          - 网络工具          |     |  Schema 校验                |
+  |  outbound/     - HTTP 客户端       |     |  旧版迁移                   |
+  |  tls/          - TLS 管理         |     +-------------+---------------+
+  |  Tailscale     - VPN 集成         |                   |
+  |  SSH           - 隧道             |                   |
+  +----------------+------------------+                   |
+                   |                                      |
+                   v                                      v
+  +----------------+--------------------------------------+------------+
+  |                            运行时                                    |
+  |                                                                     |
+  |  Shell 环境     进程执行     路径管理     错误处理     更新检查器       |
+  +---------------------------+-----+------+----------------------------+
+                              |     |
+                              v     v
+  +---------------------------+-----+------+
+  |                 数据                     |
+  |                                         |
+  |  归档管理    状态迁移    提供方用量追踪    |
+  +------------------------------------------+
 ```
 
 ### 3.9 原生应用架构
 
-```mermaid
-graph TB
-    subgraph macOS["macOS 应用 (Swift/SwiftUI)"]
-        MENU[菜单栏应用]
-        GW_CTRL[网关控制]
-        AUDIO_CAP[音频采集]
-        VOICE_WAKE[语音唤醒]
-        SETTINGS[设置界面]
-        CRON_UI[定时任务界面]
-        NOTIF[通知]
-        ONBOARD_MAC[引导流程]
-    end
-
-    subgraph iOS["iOS 应用 (Swift/SwiftUI)"]
-        CHAT_UI[聊天界面]
-        CAMERA[相机模块]
-        LOCATION[位置模块]
-        VOICE_IOS[语音模块]
-        SCREEN[屏幕模块]
-        STATUS_IOS[状态展示]
-        SETTINGS_IOS[设置]
-    end
-
-    subgraph Android["Android 应用 (Kotlin)"]
-        ANDROID_MAIN[主 Activity]
-        ANDROID_SVC[后台服务]
-    end
-
-    subgraph Shared["共享层 (Swift Package)"]
-        KIT["OpenClawKit<br/>共享框架"]
-        CHAT_SHARED["OpenClawChatUI<br/>共享聊天组件"]
-        PROTO["OpenClawProtocol<br/>协议定义"]
-    end
-
-    macOS --> Shared
-    iOS --> Shared
-    macOS & iOS & Android -->|WebSocket| GW_WS[网关 WS 服务器]
+```
+  +------------------------------+   +---------------------------+
+  |  macOS 应用 (Swift/SwiftUI)   |   |  iOS 应用 (Swift/SwiftUI)  |
+  |                              |   |                           |
+  |  菜单栏应用    网关控制        |   |  聊天界面    相机模块       |
+  |  音频采集      语音唤醒        |   |  位置模块    语音模块       |
+  |  设置界面      定时任务界面    |   |  屏幕模块    状态展示       |
+  |  通知          引导流程        |   |  设置                     |
+  +----------+-------------------+   +----------+----------------+
+             |                                  |
+             +----------------+-----------------+
+                              |
+                              v
+  +--------------------------++--------------------------+
+  |        共享层 (Swift Package)                         |
+  |                                                      |
+  |  OpenClawKit         - 共享框架                       |
+  |  OpenClawChatUI      - 共享聊天组件                    |
+  |  OpenClawProtocol    - 协议定义                       |
+  +----------------------------+-------------------------+
+                               |
+  +----------------------------+-------------------------+
+  |                  Android 应用 (Kotlin)                 |
+  |                                                      |
+  |              主 Activity     后台服务                  |
+  +----------------------------+-------------------------+
+                               |
+                               | (全部通过 WebSocket 连接)
+                               v
+                  +------------+------------+
+                  |    网关 WS 服务器         |
+                  +-------------------------+
 ```
 
 ---
 
 ## 4. 工作区包依赖树
 
-```mermaid
-graph TB
-    subgraph Root["openclaw（根包）"]
-        ROOT_PKG["openclaw v2026.2.1<br/>主 CLI + 网关"]
-    end
+```
+                          +---------------------------+
+                          |    openclaw v2026.2.1      |
+                          |    主 CLI + 网关            |
+                          +--+----------+------+------+
+                             |          |      |
+              +--------------+    +-----+      +------ 导出 plugin-sdk ------+
+              |                   |                                          |
+              v                   v                                          v
+  +-----------+------+  +---------+--------+              +------------------+--+
+  |    clawdbot      |  |     moltbot      |              |     扩展（30 个包）   |
+  | (兼容性垫片)      |  |  (兼容性垫片)     |              |                     |
+  |  -> workspace:*  |  |  -> workspace:*  |              | (devDeps -> root)   |
+  +------------------+  +------------------+              +----------+----------+
+                                                                     |
+              +----------------+----------------+--------------------+
+              |                |                |                    |
+              v                v                v                    v
+  +-----------+--+  +----------+---+  +---------+----+  +-----------+-----+
+  | 频道扩展 (19) |  | 功能扩展 (5)  |  | 认证扩展 (5)  |  | 可观测性 (1)     |
+  | (无运行时依赖) |  |              |  | (无运行时依赖) |  |                  |
+  |              |  | memory-core  |  |              |  | diagnostics-otel|
+  | discord      |  |  (无依赖)     |  | copilot-proxy|  |  -> @opentel/*  |
+  | telegram     |  | memory-lance |  | google-*-auth|  |    (10 个包)     |
+  | slack        |  |  -> lancedb  |  | minimax-auth |  +------------------+
+  | signal       |  |  -> openai   |  | qwen-auth    |
+  | imessage     |  | voice-call   |  +--------------+
+  | whatsapp     |  |  -> ws, zod  |
+  | line         |  | llm-task     |
+  | bluebubbles  |  |  (无依赖)     |
+  | msteams      |  | open-prose   |
+  | matrix       |  |  (无依赖)     |
+  | mattermost   |  +--------------+
+  | googlechat   |
+  | nextcloud    |
+  | tlon, twitch |
+  | zalo, nostr  |
+  | lobster ...  |
+  +--------------+
 
-    subgraph Shims["兼容性垫片"]
-        CLAWDBOT["clawdbot<br/>-> openclaw (workspace:*)"]
-        MOLTBOT["moltbot<br/>-> openclaw (workspace:*)"]
-    end
-
-    subgraph UI["Web UI"]
-        UI_PKG["openclaw-control-ui<br/>(Lit + Vite)"]
-    end
-
-    subgraph Extensions["扩展（30 个包）"]
-        subgraph ChannelExt["频道扩展（无运行时依赖）"]
-            E_DC["@openclaw/discord"]
-            E_TG["@openclaw/telegram"]
-            E_SL["@openclaw/slack"]
-            E_SG["@openclaw/signal"]
-            E_IM["@openclaw/imessage"]
-            E_WA["@openclaw/whatsapp"]
-            E_LN["@openclaw/line"]
-            E_BB["@openclaw/bluebubbles"]
-            E_MT["@openclaw/msteams"]
-            E_MX["@openclaw/matrix"]
-            E_MM["@openclaw/mattermost"]
-            E_GC["@openclaw/googlechat"]
-            E_NC["@openclaw/nextcloud-talk"]
-            E_TL["@openclaw/tlon"]
-            E_TW["@openclaw/twitch"]
-            E_ZA["@openclaw/zalo"]
-            E_ZU["@openclaw/zalouser"]
-            E_NO["@openclaw/nostr"]
-            E_LO["@openclaw/lobster"]
-        end
-
-        subgraph FeatureExt["功能扩展"]
-            E_MC["@openclaw/memory-core<br/>（无依赖）"]
-            E_ML["@openclaw/memory-lancedb<br/>-> @lancedb/lancedb, openai"]
-            E_VC["@openclaw/voice-call<br/>-> ws, typebox, zod"]
-            E_LT["@openclaw/llm-task<br/>（无依赖）"]
-            E_OP["@openclaw/open-prose<br/>（无依赖）"]
-        end
-
-        subgraph AuthExt["认证扩展（无运行时依赖）"]
-            E_CP["@openclaw/copilot-proxy"]
-            E_GA["@openclaw/google-antigravity-auth"]
-            E_GG["@openclaw/google-gemini-cli-auth"]
-            E_MP["@openclaw/minimax-portal-auth"]
-            E_QP["@openclaw/qwen-portal-auth"]
-        end
-
-        subgraph ObsExt["可观测性"]
-            E_OT["@openclaw/diagnostics-otel<br/>-> @opentelemetry/* (10 个包)"]
-        end
-    end
-
-    ROOT_PKG -.->|"导出 plugin-sdk"| Extensions
-    CLAWDBOT -->|"workspace:*"| ROOT_PKG
-    MOLTBOT -->|"workspace:*"| ROOT_PKG
-    Extensions -.->|"devDependencies"| ROOT_PKG
-    UI_PKG -.->|"独立"| ROOT_PKG
+                    +---------------------------+
+                    |   openclaw-control-ui     |
+                    |   Web UI (Lit + Vite)     |
+                    |   (独立，无依赖于根包)       |
+                    +---------------------------+
 ```
 
 ---
@@ -778,112 +654,61 @@ openclaw-control-ui
 
 展示 `src/` 各模块之间的依赖关系（简化版，仅保留主要依赖边）：
 
-```mermaid
-graph TB
-    entry[entry.ts] --> cli
+```
+                              entry.ts
+                                 |
+                                 v
+  +====================================================================+
+  ||                        上层模块                                    ||
+  ||                                                                   ||
+  ||  cli/ --------+-------> commands/ --------> config/               ||
+  ||   |           |            |                  ^                   ||
+  ||   |           |            +----------------> infra/              ||
+  ||   |           |            |                  ^                   ||
+  ||   |           |            +----------------> channels/           ||
+  ||   |           |                                                   ||
+  ||   +---------> gateway/ -----+-----> agents/ -----> plugins/       ||
+  ||   |              |          |          |              |            ||
+  ||   |              |          |          +----> sessions/            ||
+  ||   |              +--------> routing/  |                           ||
+  ||   |              |          |    |     +----> memory/              ||
+  ||   |              |          |    +---> config/                     ||
+  ||   |              |          |    +---> sessions/                   ||
+  ||   |              |          |                                     ||
+  ||   |              +--------> plugins/ -------> config/             ||
+  ||   |              |                            infra/              ||
+  ||   |              +--------> providers/                            ||
+  ||   |              +--------> media/  ---------> infra/             ||
+  ||   |              +--------> infra/                                ||
+  ||   |              +--------> logging/ --------> config/            ||
+  ||   |                                                               ||
+  ||   +---------> terminal/                                           ||
+  ||                   ^                                               ||
+  ||  tui/ -----------+-------> agents/                                ||
+  +====================================================================+
 
-    subgraph HighLevel["上层模块"]
-        cli[cli/]
-        gateway[gateway/]
-        commands[commands/]
-        tui[tui/]
-    end
+  +====================================================================+
+  ||                       频道实现层                                    ||
+  ||                                                                   ||
+  ||  channels/ -----+--> telegram/ --+--> media/                      ||
+  ||     |           +--> discord/  --+--> infra/                      ||
+  ||     |           +--> slack/    --+--> media/                      ||
+  ||     |           +--> signal/   --+--> infra/                      ||
+  ||     |           +--> imessage/ --+--> media/                      ||
+  ||     |           +--> web/ (WA) --+--> infra/                      ||
+  ||     |           +--> line/     --+--> media/                      ||
+  ||     |                                                             ||
+  ||     +---------> config/                                           ||
+  ||     +---------> routing/                                          ||
+  +====================================================================+
 
-    subgraph Core["核心服务"]
-        agents[agents/]
-        channels[channels/]
-        routing[routing/]
-        plugins[plugins/]
-        providers[providers/]
-    end
-
-    subgraph ChannelImpl["频道实现"]
-        telegram[telegram/]
-        discord[discord/]
-        slack[slack/]
-        signal[signal/]
-        imessage[imessage/]
-        web_wa["web/ (WhatsApp)"]
-        line_ch[line/]
-    end
-
-    subgraph Support["支撑模块"]
-        config[config/]
-        infra[infra/]
-        media[media/]
-        media_u[media-understanding/]
-        logging[logging/]
-        security[security/]
-        sessions[sessions/]
-        memory[memory/]
-        hooks[hooks/]
-        utils[utils/]
-        terminal[terminal/]
-    end
-
-    %% 上层依赖
-    cli --> commands
-    cli --> gateway
-    cli --> agents
-    cli --> channels
-    cli --> config
-    cli --> terminal
-
-    gateway --> agents
-    gateway --> channels
-    gateway --> plugins
-    gateway --> routing
-    gateway --> providers
-    gateway --> config
-    gateway --> media
-    gateway --> infra
-    gateway --> logging
-
-    commands --> config
-    commands --> channels
-    commands --> infra
-
-    tui --> agents
-    tui --> terminal
-
-    %% 核心依赖
-    agents --> plugins
-    agents --> sessions
-    agents --> memory
-    agents --> providers
-    agents --> infra
-
-    channels --> ChannelImpl
-    channels --> config
-    channels --> routing
-
-    routing --> config
-    routing --> sessions
-
-    plugins --> config
-    plugins --> infra
-
-    %% 频道实现依赖
-    telegram --> media
-    telegram --> infra
-    discord --> media
-    discord --> infra
-    slack --> media
-    slack --> infra
-    signal --> media
-    signal --> infra
-    imessage --> media
-    imessage --> infra
-    web_wa --> media
-    web_wa --> infra
-    line_ch --> media
-    line_ch --> infra
-
-    %% 支撑依赖
-    media --> infra
-    media_u --> media
-    logging --> config
-    hooks --> config
+  +====================================================================+
+  ||                       支撑模块层                                    ||
+  ||                                                                   ||
+  ||  config/   infra/   media/   logging/   security/                 ||
+  ||  sessions/ memory/  hooks/   utils/     terminal/                 ||
+  ||  media-understanding/ ---------> media/                           ||
+  +====================================================================+
 ```
 
 ---
@@ -944,95 +769,84 @@ skills/（55 个包）
 
 ## 8. 构建与 CI 流水线
 
-```mermaid
-graph LR
-    subgraph Dev["开发"]
-        CODE[源代码]
-        PNPM[pnpm install]
-        DEV[pnpm dev]
-    end
-
-    subgraph QualityGate["质量门禁"]
-        TYPECHECK["TypeScript<br/>pnpm build"]
-        LINT["Oxlint<br/>pnpm check"]
-        FORMAT["Oxfmt<br/>pnpm check"]
-        TEST["Vitest<br/>pnpm test"]
-        COV["覆盖率<br/>70% 阈值"]
-    end
-
-    subgraph Build["构建产物"]
-        TSDOWN[tsdown 打包器]
-        DIST[dist/]
-        A2UI[Canvas A2UI 包]
-        BUILD_INFO[构建信息元数据]
-    end
-
-    subgraph Release["发布"]
-        NPM[npm publish]
-        MAC_PKG[macOS DMG]
-        IOS_BLD[iOS 构建]
-        ANDROID_BLD[Android APK]
-    end
-
-    CODE --> PNPM --> DEV
-    CODE --> QualityGate
-    TYPECHECK & LINT & FORMAT & TEST --> Build
-    TEST --> COV
-    TSDOWN --> DIST
-    Build --> Release
+```
+  源代码
+     |
+     v
+  pnpm install
+     |
+     +-------------------+--------------------+
+     |                   |                    |
+     v                   v                    v
+  pnpm dev          质量门禁              构建产物
+  (开发模式)           |                    |
+                  +----+----+          +----+----+
+                  |    |    |          |    |    |
+                  v    v    v          v    v    v
+               TS检查 Oxlint Oxfmt  tsdown  A2UI  构建信息
+               (build) (check)(check) 打包   bundle 元数据
+                  |    |    |          |
+                  v    v    v          v
+               Vitest 测试          dist/ 目录
+                  |
+                  v
+               覆盖率 (70% 阈值)
+                  |
+                  +----> 全部通过
+                            |
+             +--------------+--------------+-----------+
+             |              |              |           |
+             v              v              v           v
+         npm publish    macOS DMG     iOS 构建    Android APK
 ```
 
 ---
 
 ## 9. 部署拓扑
 
-```mermaid
-graph TB
-    subgraph Local["本地机器"]
-        CLI_LOCAL[openclaw CLI]
-        GW_LOCAL["网关服务器<br/>端口 18789"]
-        MAC_APP[macOS 菜单栏应用]
-    end
-
-    subgraph Remote["远程 / 云"]
-        VPS["VPS / exe.dev VM"]
-        FLY[Fly.io 实例]
-        RAILWAY[Railway / Northflank]
-    end
-
-    subgraph Platforms["消息平台"]
-        TG_API[Telegram API]
-        DC_API[Discord API]
-        SL_API[Slack API]
-        WA_WEB[WhatsApp Web]
-        SG_SVC[Signal Service]
-        LINE_API[LINE API]
-    end
-
-    subgraph LLMs["LLM 提供方"]
-        CLAUDE[Anthropic Claude]
-        GPT[OpenAI GPT]
-        GEMINI[Google Gemini]
-        BEDROCK[AWS Bedrock]
-        LOCAL_LLM["本地 LLM<br/>node-llama-cpp"]
-    end
-
-    subgraph Apps["移动 / 桌面端"]
-        IOS_APP[iOS 应用]
-        ANDROID_APP[Android 应用]
-    end
-
-    CLI_LOCAL --> GW_LOCAL
-    MAC_APP --> GW_LOCAL
-    IOS_APP -->|WebSocket| GW_LOCAL
-    ANDROID_APP -->|WebSocket| GW_LOCAL
-
-    GW_LOCAL --> Platforms
-    GW_LOCAL --> LLMs
-
-    VPS --> Platforms
-    VPS --> LLMs
-    FLY --> Platforms
+```
+  +---------------------------+          +---------------------------+
+  |        本地机器             |          |       远程 / 云            |
+  |                           |          |                           |
+  |  +-------------------+   |          |  +-------------------+    |
+  |  | openclaw CLI      |   |          |  | VPS / exe.dev VM  |    |
+  |  +---------+---------+   |          |  +---------+---------+    |
+  |            |              |          |            |              |
+  |            v              |          |  +---------+---------+    |
+  |  +---------+---------+   |          |  | Fly.io 实例        |    |
+  |  | 网关服务器          |   |          |  +---------+---------+    |
+  |  | (端口 18789)       |   |          |            |              |
+  |  +---------+---------+   |          |  +---------+---------+    |
+  |            ^              |          |  | Railway/Northflank|    |
+  |  +---------+---------+   |          |  +-------------------+    |
+  |  | macOS 菜单栏应用    |   |          +----------+----------------+
+  |  +-------------------+   |                       |
+  +----------+----------------+                      |
+             |                                       |
+             +----------------+----------------------+
+                              |
+              +---------------+----------------+
+              |                                |
+              v                                v
+  +-----------+------------+     +-------------+----------+
+  |       消息平台          |     |        LLM 提供方       |
+  |                        |     |                        |
+  |  Telegram API          |     |  Anthropic Claude      |
+  |  Discord API           |     |  OpenAI GPT            |
+  |  Slack API             |     |  Google Gemini         |
+  |  WhatsApp Web          |     |  AWS Bedrock           |
+  |  Signal Service        |     |  本地 LLM              |
+  |  LINE API              |     |    (node-llama-cpp)    |
+  +-----------+------------+     +------------------------+
+              ^
+              |
+  +-----------+----------------------------+
+  |          移动 / 桌面端                    |
+  |                                         |
+  |  iOS 应用 ----+                         |
+  |               +--> WebSocket --> 网关    |
+  |  Android 应用 -+                        |
+  +------------------------------------------+
 ```
 
 ---
